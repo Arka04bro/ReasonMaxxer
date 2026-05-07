@@ -116,9 +116,12 @@ def main() -> None:
             tag_to_pass[tag] = float(p1)
             continue
 
+        script_dir = Path(__file__).resolve().parent
+        generate_script = script_dir / "generate_rollouts.py"
+
         cmd = [
             sys.executable,
-            "generate_rollouts.py",
+            str(generate_script),
             "--model_path",
             args.base_model,
             "--lora_adapter",
