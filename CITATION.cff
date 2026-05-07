@@ -1,0 +1,22 @@
+cff-version: 1.2.0
+title: ReasonMaxxer
+authors:
+  - family-names: Akgul
+    given-names: Omer Faruk
+message: "If you use this repository, please cite the accompanying paper."
+type: software
+version: 0.1.0
+license: MIT
+repository-code: https://github.com/<your-org>/ReasonMaxxer
+url: https://github.com/<your-org>/ReasonMaxxer
+abstract: >-
+  Minimal public implementation of ReasonMaxxer for offline rollout generation,
+  entropy scoring, contrastive decision-token training, and checkpoint
+  evaluation for mathematical reasoning models.
+preferred-citation:
+  type: article
+  title: Rethinking RL for LLM Reasoning: It's Sparse Policy Selection, Not Capability Learning
+  authors:
+    - family-names: Placeholder
+      given-names: Placeholder
+  year: 2026
