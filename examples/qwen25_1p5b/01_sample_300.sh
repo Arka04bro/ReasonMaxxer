@@ -7,4 +7,9 @@ TRAIN_PARQUET=${TRAIN_PARQUET:-data/external/simpleRL/simplelr_abel_level3to5/tr
 
 mkdir -p "$ROOT"
 
+if [ ! -f "$TRAIN_PARQUET" ]; then
+  echo "[setup] missing $TRAIN_PARQUET; downloading public SimpleRL-Zoo data"
+  $PYTHON scripts/download_simplerl_data.py     --style abel     --subset level3to5     --splits train     --out_dir data/external/simpleRL
+fi
+
 $PYTHON scripts/sample_simplerl_records.py   --train_parquet "$TRAIN_PARQUET"   --levels 3,4,5   --per_level 100   --shard_size 100   --merged_shard_size 100   --seed 42   --out_dir "$ROOT/sampled_records"

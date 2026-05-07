@@ -78,6 +78,8 @@ conda activate reasonmaxxer
 pip install -r requirements.txt
 ```
 
+The example scripts expect the SimpleRL-Zoo training parquet. The first sampling script will download the public `simplelr_abel_level3to5` training split automatically when it is missing.
+
 ## Supported benchmarks and data format
 
 Built-in dataset loading is provided for:
@@ -155,6 +157,7 @@ These scripts are intended as **reference recipes** for using the codebase. They
 - `scripts/prepare_training_data.py`: convert scored rollouts into ReasonMaxxer training examples
 - `scripts/train_reasonmaxxer.py`: train the LoRA adapter with sparse contrastive updates and KL anchoring
 - `scripts/eval_checkpoints.py`: evaluate saved checkpoints on a fixed held-out split and summarize pass@1
+- `scripts/download_simplerl_data.py`: download the public SimpleRL-Zoo parquet files used by the example pipeline
 
 ## Citation
 
