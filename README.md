@@ -2,32 +2,51 @@
 
 **Rethinking RL for LLM Reasoning: It's Sparse Policy Selection, Not Capability Learning**
 
-This repository contains the **minimal public ReasonMaxxer pipeline** used for our rollout-generation, entropy scoring, contrastive training, and checkpoint evaluation runs.
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-Unlike the internal research repo, this release intentionally excludes unrelated analysis code, RL baselines, code-reasoning utilities, and experiment bookkeeping. The goal is to make the core **RL-free reasoning post-training pipeline** easy to read, reproduce, and extend.
+ReasonMaxxer is an **offline post-training method for reasoning models**.  
+Instead of running online reinforcement learning, it identifies a small set of **high-entropy decision tokens** in model rollouts and applies contrastive updates only where the policy appears genuinely uncertain.
 
-![ReasonMaxxer main table](assets/reasonmaxxer_table.png)
+Our central claim is simple: **for mathematical reasoning, much of the useful effect of RL is sparse and localized**. Once those decision points are identified, a lightweight offline procedure can recover much of the benefit of RL at a tiny fraction of the cost.
 
-## Overview
+![ReasonMaxxer main results](assets/reasonmaxxer_table.png)
 
-ReasonMaxxer is built around a simple empirical claim: for mathematical reasoning, the useful footprint of RL is **sparse** and concentrated at **high-entropy decision points**. Instead of running online RL, ReasonMaxxer:
+## Why ReasonMaxxer?
 
-1. samples a few hundred problems,
-2. generates multiple base-model rollouts,
-3. computes token entropies with teacher-forced scoring,
-4. selects medium-pass-rate problems with both correct and incorrect rollouts,
-5. trains a LoRA adapter with **contrastive loss only on entropy-gated decision tokens**, while anchoring the rest of the distribution to the base model.
+ReasonMaxxer is designed to answer a practical question:
 
-The public repo includes:
+> Can we recover the reasoning benefits of RL **without** online rollouts, reward optimization, or large-scale training runs?
 
-- rollout generation with model-specific prompt auto-resolution,
-- entropy scoring for generated rollouts,
-- training-data preparation,
+In the paper, we show that the answer is often yes. Across multiple model families, ReasonMaxxer is competitive with or better than public RL baselines while remaining dramatically cheaper to reproduce.
+
+At a high level, ReasonMaxxer:
+
+- uses **offline base-model rollouts**,
+- detects **uncertain decision points** via token entropy,
+- applies **contrastive learning only at those sparse positions**,
+- preserves the rest of the model distribution with a **KL anchor**,
+- and trains a **small LoRA adapter** rather than full model weights.
+
+## Main contributions
+
+- **RL-free reasoning post-training.** No online RL loop is required.
+- **Sparse policy learning.** Updates are concentrated on entropy-gated decision tokens rather than all generated tokens.
+- **Cheap reproduction.** The method is designed to be lightweight enough for commodity multi-GPU setups.
+- **Cross-family applicability.** The same pipeline can be used across Qwen, Qwen3, DeepSeek-Distill, Mistral, and related causal LMs with model-specific prompting defaults.
+
+## What this repository contains
+
+This repository provides the core pipeline used for ReasonMaxxer experiments:
+
+- rollout generation,
+- entropy scoring,
+- mid-difficulty pool selection,
 - ReasonMaxxer LoRA training,
-- checkpoint evaluation on fixed holdout splits,
-- example shell scripts for the default Qwen2.5-1.5B pipeline.
+- checkpoint evaluation on held-out and benchmark sets.
 
-## Repository layout
+The repo is intentionally focused on the **ReasonMaxxer pipeline itself**. It does not include unrelated research code, RL baselines, or internal experiment management tooling.
+
+## Repository structure
 
 ```text
 ReasonMaxxer/
@@ -59,9 +78,14 @@ conda activate reasonmaxxer
 pip install -r requirements.txt
 ```
 
-## Data format
+## Supported benchmarks and data format
 
-For custom local benchmarks, pass `--records_file` with a JSON file of the form:
+Built-in dataset loading is provided for:
+
+- `math500` via `nlile/hendrycks-MATH-benchmark`
+- `gsm8k` via `openai/gsm8k`
+
+For local benchmarks such as `aime24`, `amc23`, `minerva_math`, and `olympiadbench`, pass a records file in the following format:
 
 ```json
 {
@@ -76,67 +100,43 @@ For custom local benchmarks, pass `--records_file` with a JSON file of the form:
 }
 ```
 
-Built-in dataset loading is provided for:
-
-- `math500` via `nlile/hendrycks-MATH-benchmark`
-- `gsm8k` via `openai/gsm8k`
-
-For `aime24`, `amc23`, `minerva_math`, and `olympiadbench`, either:
-
-- place benchmark JSONs under `data/benchmarks/`, or
-- pass `--records_file` directly.
-
 ## Prompting defaults
 
-Prompt style is resolved automatically from the model name unless overridden.
+Prompt style is resolved automatically from the model name unless you override it.
 
-- Qwen2.5 base models: `qwen_boxed`
-- Qwen3 instruct/reasoning models: `qwen3_chat` or `chat_template`
-- DeepSeek-R1-Distill / ORZ / Open-RS / related reasoning-chat models: `chat_template`
-- LLaMA / Mistral: `llama_abel`
-- OLMo math checkpoints: `qwen_boxed`, `olmo3_math`, or `olmo3_rlzero_math` depending on the checkpoint name
+- **Qwen2.5 base models**: `qwen_boxed`
+- **Qwen3 reasoning/instruct models**: `qwen3_chat` or `chat_template`
+- **DeepSeek-R1-Distill / ORZ / related chat reasoning models**: `chat_template`
+- **LLaMA / Mistral**: `llama_abel`
+- **OLMo math checkpoints**: `qwen_boxed`, `olmo3_math`, or `olmo3_rlzero_math`
 
-The default generation settings in this repo match our paper-facing runs:
+The common evaluation defaults used in this repo are:
 
 - `temperature=0.6`
 - `top_p=0.95`
-- `max_tokens=8192`
 - `seed=42`
 
-## Quick start: default Qwen2.5-1.5B run
+## Example run
 
-The example shell scripts under `examples/qwen25_1p5b/` implement the default direct pipeline:
+The scripts in `examples/qwen25_1p5b/` provide a **concrete example pipeline** for Qwen2.5-1.5B:
 
-- sample `3 x 100` problems from SimpleRL levels `3/4/5`
-- generate `20` rollouts per problem
-- entropy-score the rollouts
-- select the global **mid-50** problem pool
-- trim the longest `20%`
-- train a `tau=1.4` or tau sweep LoRA adapter
-- evaluate checkpoints on a fixed holdout split
+1. sample candidate training problems,
+2. generate multi-rollout responses,
+3. score rollouts with teacher-forced entropy,
+4. select a mid-difficulty pool and trim long tails,
+5. train a ReasonMaxxer LoRA adapter,
+6. select checkpoints on a held-out split,
+7. evaluate the chosen checkpoint on benchmark suites.
 
-### 1. Sample the 300-problem candidate set
+Run the example pipeline step by step:
 
 ```bash
 bash examples/qwen25_1p5b/01_sample_300.sh
-```
-
-### 2. Generate and score `3 x 100 x 20` rollouts
-
-```bash
 bash examples/qwen25_1p5b/02_generate_score_3x100x20.sh
-```
-
-### 3. Select the mid-50 pool and apply trim-80
-
-```bash
 bash examples/qwen25_1p5b/03_select_mid50_trim80.sh
-```
-
-### 4. Train ReasonMaxxer
-
-```bash
 bash examples/qwen25_1p5b/04_train_tau1p4.sh
+bash examples/qwen25_1p5b/05_eval_holdout60.sh
+bash examples/qwen25_1p5b/06_eval_fullsuite.sh
 ```
 
 Optional tau sweep:
@@ -145,67 +145,16 @@ Optional tau sweep:
 bash examples/qwen25_1p5b/04_train_tau_sweep.sh
 ```
 
-### 5. Evaluate checkpoints on a fixed holdout split
+These scripts are intended as **reference recipes** for using the codebase. They are not meant to encode every exact model-specific setting used in every paper table.
 
-```bash
-bash examples/qwen25_1p5b/05_eval_holdout60.sh
-```
+## Core scripts
 
-### 6. Evaluate a chosen checkpoint on the full benchmark suite
-
-```bash
-bash examples/qwen25_1p5b/06_eval_fullsuite.sh
-```
-
-## Example end-to-end defaults
-
-The example Qwen2.5-1.5B scripts use the same paper-facing defaults:
-
-- source candidate pool: `300` SimpleRL train problems, balanced as `100` each from levels `3/4/5`
-- rollout count: `20` per problem
-- pool selection: globally closest to `0.5` empirical pass rate
-- trim: global shortest `80%`
-- LoRA target modules: `q_proj,k_proj,v_proj,o_proj`
-- rank: `32`
-- alpha: `64`
-- dropout: `0.0`
-- objective: contrastive decision-token training + KL anchor
-
-## Notes
-
-- `scripts/generate_rollouts.py` can evaluate either a base model or a LoRA adapter via vLLM LoRA requests.
-- `scripts/score_rollouts.py` performs teacher-forced entropy extraction using Hugging Face models.
-- `scripts/train_reasonmaxxer.py` is the training entrypoint for the contrastive LoRA method.
-- `scripts/eval_checkpoints.py` sweeps saved checkpoints over a fixed holdout ID file and writes a summary CSV.
-
-## Before you publish
-
-This repo is intentionally minimal, but you still need to verify three external dependencies before making it public:
-
-1. benchmark files you reference locally are either redistributed legally or replaced with instructions,
-2. model identifiers in the example scripts point to public model names or environment variables,
-3. the citation metadata in `CITATION.cff` and the BibTeX block below are updated with the final paper metadata.
-
-## Publishing checklist
-
-```bash
-git init
-git branch -M main
-git add .
-git commit -m "Initial public release"
-gh repo create ReasonMaxxer --public --source=. --remote=origin --push
-```
-
-If you do not use `gh`, create an empty GitHub repository first, then run:
-
-```bash
-git init
-git branch -M main
-git add .
-git commit -m "Initial public release"
-git remote add origin git@github.com:<your-org>/ReasonMaxxer.git
-git push -u origin main
-```
+- `scripts/generate_rollouts.py`: generate base-model or LoRA-adapted rollouts
+- `scripts/score_rollouts.py`: compute teacher-forced token entropies for generated rollouts
+- `scripts/select_mid_pool.py`: merge scored rollouts, select mid-difficulty problems, and optionally trim long tails
+- `scripts/prepare_training_data.py`: convert scored rollouts into ReasonMaxxer training examples
+- `scripts/train_reasonmaxxer.py`: train the LoRA adapter with sparse contrastive updates and KL anchoring
+- `scripts/eval_checkpoints.py`: evaluate saved checkpoints on a fixed held-out split and summarize pass@1
 
 ## Citation
 
