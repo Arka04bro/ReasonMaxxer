@@ -2,7 +2,10 @@
 
 **Rethinking RL for LLM Reasoning: It's Sparse Policy Selection, Not Capability Learning**
 
+[![arXiv](https://img.shields.io/badge/arXiv-2605.06241-b31b1b.svg)](https://arxiv.org/abs/2605.06241)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+
+[[Paper]](https://arxiv.org/abs/2605.06241)
 
 ReasonMaxxer is an **offline post-training method for reasoning models**.  
 Instead of running online reinforcement learning, it identifies a small set of **high-entropy decision tokens** in model rollouts and applies contrastive updates only where the policy appears genuinely uncertain.
