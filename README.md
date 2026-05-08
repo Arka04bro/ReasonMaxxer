@@ -162,9 +162,13 @@ These scripts are intended as **reference recipes** for using the codebase. They
 ## Citation
 
 ```bibtex
-@article{reasonmaxxer2026placeholder,
-  title={ReasonMaxxer: Sparse Policy Selection for RL-Free Reasoning},
-  author={Anonymous until release},
-  year={2026}
+@misc{akgül2026rethinkingrlllmreasoning,
+      title={Rethinking RL for LLM Reasoning: It's Sparse Policy Selection, Not Capability Learning}, 
+      author={Ömer Faruk Akgül and Rajgopal Kannan and Willie Neiswanger and Viktor Prasanna},
+      year={2026},
+      eprint={2605.06241},
+      archivePrefix={arXiv},
+      primaryClass={cs.CL},
+      url={https://arxiv.org/abs/2605.06241}, 
 }
 ```
