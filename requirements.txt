@@ -1,0 +1,13 @@
+torch>=2.3
+transformers>=4.51
+peft>=0.14
+datasets>=2.19
+vllm>=0.8.3
+tqdm>=4.66
+pandas>=2.2
+pyarrow>=16.0
+sympy>=1.12
+numpy>=1.26
+accelerate>=0.33
+safetensors>=0.4
+sentencepiece>=0.2
