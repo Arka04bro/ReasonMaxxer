@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+import sys
+from pathlib import Path as _Path
+
+sys.path.insert(0, str(_Path(__file__).resolve().parents[1]))
+
 import argparse
 import json
 import random
@@ -7,6 +12,8 @@ import statistics
 from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
+
+from reasonmaxxer import gating
 
 
 
@@ -85,6 +92,39 @@ def _select_targets(
     return chosen_ids, infos
 
 
+def _gate_summary(
+    gate: str,
+    diags: list[dict[str, Any]],
+    tau_reference_counts: list[int],
+) -> dict[str, Any]:
+    """Per-rollout gate diagnostics, including the signal-mass check.
+
+    Budget-matched controls have the same token count as the entropy gate by
+    construction, but not the same summed base entropy. Since cross-entropy
+    correlates with base entropy, unequal signal mass means unequal gradient
+    mass, and any accuracy comparison has to account for it.
+    """
+    if not diags:
+        return {"gate": gate, "num_rollouts": 0}
+    n = float(len(diags))
+    tau_total = float(sum(tau_reference_counts)) if tau_reference_counts else 0.0
+    sel_total = float(sum(d["num_selected"] for d in diags))
+    return {
+        "gate": gate,
+        "num_rollouts": int(n),
+        "tokens_per_rollout_mean": sel_total / n,
+        "tokens_per_rollout_median": float(statistics.median([d["num_selected"] for d in diags])),
+        "selected_frac_mean": float(sum(d["selected_frac"] for d in diags) / n),
+        "selected_entropy_mean": float(sum(d["selected_entropy_mean"] for d in diags) / n),
+        "unselected_entropy_mean": float(sum(d["unselected_entropy_mean"] for d in diags) / n),
+        "signal_mass_total": float(sum(d["signal_mass"] for d in diags)),
+        "signal_mass_per_rollout_mean": float(sum(d["signal_mass"] for d in diags) / n),
+        "relative_position_mean": float(sum(d["relative_position_mean"] for d in diags) / n),
+        "tau_reference_tokens_total": tau_total,
+        "budget_match_ratio": (sel_total / tau_total) if tau_total > 0 else None,
+    }
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description="Prepare ReasonMaxxer training data from base entropy rollouts.")
     p.add_argument("--rollouts_file", default="data/contrastive_experiments/base_rollouts_math500_train_n40.json")
@@ -114,6 +154,37 @@ def main() -> None:
             "Keep only correct rollouts and assign advantage=1.0 to each retained rollout. "
             "Use this with decision_objective=correct_sft for strict positive-only training."
         ),
+    )
+    p.add_argument(
+        "--gate",
+        choices=list(gating.GATES),
+        default="entropy_tau",
+        help=(
+            "Decision-token gate. 'entropy_tau' reproduces v1. The remaining gates are "
+            "budget-matched controls for the Phase 1 causal test."
+        ),
+    )
+    p.add_argument("--budget_k", type=int, default=0, help="Absolute per-rollout token budget K for budgeted gates.")
+    p.add_argument(
+        "--budget_frac",
+        type=float,
+        default=0.0,
+        help="Per-rollout budget as a fraction of eligible positions (also sets the quantile for entropy_quantile).",
+    )
+    p.add_argument(
+        "--budget_match_tau",
+        action="store_true",
+        help=(
+            "Set each rollout's budget to the number of tokens the entropy gate would have selected "
+            "on that same rollout. This is the correct per-rollout matching for control gates."
+        ),
+    )
+    p.add_argument("--gate_seed", type=int, default=42, help="Seed for stochastic gates (random).")
+    p.add_argument(
+        "--shuffle_advantages",
+        choices=["none", "within_problem", "global"],
+        default="none",
+        help="Control that destroys the outcome-token association while keeping the advantage marginal.",
     )
     p.add_argument(
         "--code_decision_scope",
@@ -198,6 +269,8 @@ def main() -> None:
     training_examples: list[dict[str, Any]] = []
 
     decision_counts: list[int] = []
+    gate_diags: list[dict[str, Any]] = []
+    tau_reference_counts: list[int] = []
     decision_frac: list[float] = []
     decision_entropies: list[float] = []
     advantages: list[float] = []
@@ -231,24 +304,49 @@ def main() -> None:
             gen_pred_start = max(prompt_length - 1, 0)
             max_pred_index = len(input_ids) - 1
 
-            decision_positions: list[int] = []
             thr = float(tau_pos if correct else tau_neg)
             code_span_start = r.get("code_span_start_in_full")
             code_span_end = r.get("code_span_end_in_full")
-            for i, ent in enumerate(entropies):
+
+            eligible: list[int] = []
+            for i in range(len(entropies)):
                 pred_pos = gen_pred_start + i
                 if pred_pos >= max_pred_index:
                     break
-                if float(ent) > thr:
-                    if (
-                        args.code_decision_scope == "extracted_code"
-                        and code_span_start is not None
-                        and code_span_end is not None
-                        and not (int(code_span_start) <= int(pred_pos) < int(code_span_end))
-                    ):
-                        continue
-                    decision_positions.append(int(pred_pos))
-                    decision_entropies.append(float(ent))
+                if (
+                    args.code_decision_scope == "extracted_code"
+                    and code_span_start is not None
+                    and code_span_end is not None
+                    and not (int(code_span_start) <= int(pred_pos) < int(code_span_end))
+                ):
+                    continue
+                eligible.append(i)
+
+            gen_index_val = int(r.get("gen_index", 0))
+            if args.gate == "entropy_quantile":
+                k_budget = int(round(float(args.budget_frac) * len(eligible)))
+            else:
+                k_budget = gating.resolve_budget(
+                    gate=args.gate,
+                    entropies=entropies,
+                    eligible=eligible,
+                    tau=thr,
+                    budget_k=int(args.budget_k),
+                    budget_frac=float(args.budget_frac),
+                    budget_match_tau=bool(args.budget_match_tau),
+                )
+            sel_idx = gating.select_positions(
+                entropies,
+                eligible,
+                gate=str(args.gate),
+                tau=thr,
+                k=int(k_budget),
+                rng=gating.rollout_rng(int(args.gate_seed), str(pid), gen_index_val),
+            )
+            decision_positions = [int(gen_pred_start + i) for i in sel_idx]
+            decision_entropies.extend(float(entropies[i]) for i in sel_idx)
+            gate_diags.append(gating.gate_diagnostics(entropies, eligible, sel_idx))
+            tau_reference_counts.append(gating.tau_count(entropies, eligible, thr))
 
             reward = 1.0 if correct else 0.0
             if args.positive_only:
@@ -309,6 +407,30 @@ def main() -> None:
                     }
                 )
 
+    if args.shuffle_advantages != "none" and processed_rollouts:
+        # Control: keep the advantage marginal distribution, destroy its association
+        # with the rollout outcome. Any gain surviving this is not credit assignment.
+        shuffle_rng = random.Random(int(args.gate_seed) + 977)
+        if args.shuffle_advantages == "global":
+            groups = {"__all__": list(range(len(processed_rollouts)))}
+        else:
+            groups = defaultdict(list)
+            for idx, row in enumerate(processed_rollouts):
+                groups[str(row["problem_id"])].append(idx)
+        for idxs in groups.values():
+            values = [float(processed_rollouts[i]["advantage"]) for i in idxs]
+            shuffle_rng.shuffle(values)
+            for i, v in zip(idxs, values):
+                processed_rollouts[i]["advantage"] = float(v)
+        remap = {
+            (str(row["problem_id"]), int(row["gen_index"])): float(row["advantage"])
+            for row in processed_rollouts
+        }
+        for ex in training_examples:
+            key = (str(ex["problem_id"]), int(ex["gen_index"]))
+            if key in remap:
+                ex["advantage"] = remap[key]
+
     processed_payload = {
         "rollouts": processed_rollouts,
         "config": {
@@ -328,6 +450,12 @@ def main() -> None:
             "n_problems_selected": len(target_ids),
             "n_rollouts_selected": len(processed_rollouts),
             "code_decision_scope": str(args.code_decision_scope),
+            "gate": str(args.gate),
+            "budget_k": int(args.budget_k),
+            "budget_frac": float(args.budget_frac),
+            "budget_match_tau": bool(args.budget_match_tau),
+            "gate_seed": int(args.gate_seed),
+            "shuffle_advantages": str(args.shuffle_advantages),
         },
     }
     processed_path = Path(args.processed_output)
@@ -366,6 +494,7 @@ def main() -> None:
             if pos_decision_tokens_total > 0
             else None
         ),
+        "gate": _gate_summary(str(args.gate), gate_diags, tau_reference_counts),
         "decision_positions_per_rollout_mean": float(statistics.mean(decision_counts)) if decision_counts else 0.0,
         "decision_positions_per_rollout_median": float(statistics.median(decision_counts)) if decision_counts else 0.0,
         "decision_fraction_mean": float(statistics.mean(decision_frac)) if decision_frac else 0.0,
