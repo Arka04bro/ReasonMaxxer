@@ -476,13 +476,55 @@ def main() -> None:
     )
     p.add_argument("--adv_clip", type=float, default=2.5)
     p.add_argument(
+        "--clip_eps_low",
+        type=float,
+        default=0.2,
+        help="Lower PPO clip bound for decision_objective=clipped_ratio.",
+    )
+    p.add_argument(
+        "--clip_eps_high",
+        type=float,
+        default=0.2,
+        help="Upper PPO clip bound (set larger than --clip_eps_low for clip-higher).",
+    )
+    p.add_argument(
+        "--dual_clip_c",
+        type=float,
+        default=3.0,
+        help=(
+            "Dual-clip constant for negative advantages (Ye et al., 2020). Plain PPO clipping is "
+            "bounded below but grows without limit when a negative-advantage ratio runs large, so "
+            "the surrogate is additionally floored at c*A. Set 0 to disable."
+        ),
+    )
+    p.add_argument(
+        "--behavior_temperature",
+        type=float,
+        default=1.0,
+        help=(
+            "Sampling temperature used to generate the rollouts. The importance ratio is taken "
+            "against the behaviour policy pi_base^(1/T), not against the T=1 base distribution. "
+            "The KL anchor stays at T=1 because it anchors the model, not the sampler."
+        ),
+    )
+    p.add_argument(
+        "--kl_decision_weight",
+        type=float,
+        default=0.0,
+        help=(
+            "KL weight applied at decision tokens as well. v1 left decision tokens with no trust "
+            "region at all, which is where the distribution can collapse."
+        ),
+    )
+    p.add_argument(
         "--decision_objective",
-        choices=["adv_ce", "delta_hinge", "correct_sft"],
+        choices=["adv_ce", "delta_hinge", "correct_sft", "clipped_ratio"],
         default="adv_ce",
         help=(
             "Decision-token objective: "
             "legacy signed-adv CE, anchored delta hinge, "
-            "or correct-rollout-only CE (entropy-gated SFT)."
+            "correct-rollout-only CE (entropy-gated SFT), "
+            "or the bounded clipped off-policy surrogate."
         ),
     )
     p.add_argument(
@@ -1019,6 +1061,16 @@ def main() -> None:
                 base_target_logp = base_logp.gather(dim=-1, index=target.unsqueeze(-1)).squeeze(-1)
                 delta_logp = student_target_logp - base_target_logp
 
+                # The rollouts were sampled at temperature T, so the behaviour policy is
+                # pi_base^(1/T) renormalised, not pi_base itself. Only the importance ratio
+                # uses it; base_logp above stays at T=1 for the KL anchor.
+                if abs(float(args.behavior_temperature) - 1.0) > 1e-6:
+                    behavior_logp = F.log_softmax(base_logits / float(args.behavior_temperature), dim=-1)
+                    behavior_target_logp = behavior_logp.gather(dim=-1, index=target.unsqueeze(-1)).squeeze(-1)
+                else:
+                    behavior_target_logp = base_target_logp
+                log_ratio = student_target_logp - behavior_target_logp
+
                 if args.variant == "fullseq":
                     contrastive_mask = b.generated_pred_mask & b.valid_pred_mask
                 else:
@@ -1083,6 +1135,58 @@ def main() -> None:
                     )
                     neg_pressure_sum = (
                         float((neg_obj_tok * neg_mask.float() * row_w).sum().item()) if neg_decision_count > 0 else 0.0
+                    )
+                elif args.decision_objective == "clipped_ratio":
+                    # Bounded off-policy surrogate. Unlike A*CE this cannot be driven to
+                    # -inf by negative advantages: once the ratio leaves the trust region the
+                    # clipped term takes over and its gradient vanishes.
+                    ratio = torch.exp(log_ratio.clamp(min=-20.0, max=20.0))
+                    lo = 1.0 - float(args.clip_eps_low)
+                    hi = 1.0 + float(args.clip_eps_high)
+                    adv_eff = adv
+                    if float(current_beta_neg) != 1.0:
+                        adv_eff = torch.where(adv < 0, adv * float(current_beta_neg), adv)
+                    surrogate_tok = torch.min(ratio * adv_eff, ratio.clamp(lo, hi) * adv_eff)
+                    if float(args.dual_clip_c) > 1.0:
+                        # For A < 0 the unclipped branch is the one that survives min(), so the
+                        # surrogate falls linearly in the ratio and the gradient can blow up.
+                        # Flooring it at c*A bounds the loss and zeroes the gradient past the floor.
+                        surrogate_tok = torch.where(
+                            adv_eff < 0,
+                            torch.maximum(surrogate_tok, float(args.dual_clip_c) * adv_eff),
+                            surrogate_tok,
+                        )
+                    obj_tok = -surrogate_tok
+
+                    if pos_decision_count > 0:
+                        pos_num = (obj_tok * pos_mask.float() * row_w).sum()
+                        pos_den = (pos_mask.float() * row_w).sum().clamp_min(1e-9)
+                        pos_loss = pos_num / pos_den
+                    else:
+                        pos_loss = token_ce.new_zeros(())
+
+                    if neg_decision_count > 0:
+                        neg_num = (obj_tok * neg_mask.float() * row_w).sum()
+                        neg_den = (neg_mask.float() * row_w).sum().clamp_min(1e-9)
+                        neg_loss = neg_num / neg_den
+                    else:
+                        neg_loss = token_ce.new_zeros(())
+
+                    if decision_count > 0:
+                        if bool(args.balance_pos_neg) and pos_decision_count > 0 and neg_decision_count > 0:
+                            decision_loss = 0.5 * (pos_loss + neg_loss)
+                        else:
+                            num = (obj_tok * contrastive_effective_mask.float() * row_w).sum()
+                            den = (contrastive_effective_mask.float() * row_w).sum().clamp_min(1e-9)
+                            decision_loss = num / den
+                    else:
+                        decision_loss = token_ce.new_zeros(())
+
+                    pos_pressure_sum = (
+                        float((obj_tok * pos_mask.float() * row_w).sum().item()) if pos_decision_count > 0 else 0.0
+                    )
+                    neg_pressure_sum = (
+                        float((obj_tok * neg_mask.float() * row_w).sum().item()) if neg_decision_count > 0 else 0.0
                     )
                 elif args.decision_objective == "correct_sft":
                     # Entropy-gated SFT: optimize CE only on decision tokens from correct rollouts.
@@ -1161,16 +1265,25 @@ def main() -> None:
                 generated_count = int((b.valid_pred_mask & b.generated_pred_mask).sum().item())
                 decision_frac_valid = _safe_div(float(decision_count), float(valid_count), default=0.0)
                 decision_frac_generated = _safe_div(float(decision_count), float(generated_count), default=0.0)
-                if nondec_count > 0 and float(args.kl_weight) > 0:
+                kl_decision_weight = float(args.kl_decision_weight)
+                need_kl = (nondec_count > 0 and float(args.kl_weight) > 0) or (
+                    decision_count > 0 and kl_decision_weight > 0
+                )
+                kl_decision_loss = token_ce.new_zeros(())
+                kl_loss = token_ce.new_zeros(())
+                if need_kl:
                     base_prob = F.softmax(base_logits, dim=-1)
                     kl_per_tok = F.kl_div(student_logp, base_prob, reduction="none").sum(dim=-1)
-                    kl_num = (kl_per_tok * nondecision_mask.float() * row_w).sum()
-                    kl_den = (nondecision_mask.float() * row_w).sum().clamp_min(1e-9)
-                    kl_loss = kl_num / kl_den
-                else:
-                    kl_loss = token_ce.new_zeros(())
+                    if nondec_count > 0 and float(args.kl_weight) > 0:
+                        kl_num = (kl_per_tok * nondecision_mask.float() * row_w).sum()
+                        kl_den = (nondecision_mask.float() * row_w).sum().clamp_min(1e-9)
+                        kl_loss = kl_num / kl_den
+                    if decision_count > 0 and kl_decision_weight > 0:
+                        dkl_num = (kl_per_tok * contrastive_effective_mask.float() * row_w).sum()
+                        dkl_den = (contrastive_effective_mask.float() * row_w).sum().clamp_min(1e-9)
+                        kl_decision_loss = dkl_num / dkl_den
 
-                loss = decision_loss + float(args.kl_weight) * kl_loss
+                loss = decision_loss + float(args.kl_weight) * kl_loss + kl_decision_weight * kl_decision_loss
 
             if torch.isnan(loss) or torch.isinf(loss):
                 raise RuntimeError(
