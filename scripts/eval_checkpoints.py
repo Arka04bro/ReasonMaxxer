@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+import sys
+from pathlib import Path as _Path
+
+sys.path.insert(0, str(_Path(__file__).resolve().parents[1]))
+
 import argparse
 import csv
 import json
@@ -8,6 +13,34 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import Any
+
+
+from reasonmaxxer import metrics as mx
+
+
+def _sampling_metrics(path: Path, ks: list[int], maj_trials: int, seed: int) -> dict:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    rows = payload.get("results", []) or []
+    return mx.summarize(rows, ks=tuple(ks), maj_trials=maj_trials, seed=seed)
+
+
+def _record_for(
+    *, tag: str, ckpt: Path, out_json: Path, ks: list[int], maj_trials: int, seed: int
+) -> tuple[dict, dict]:
+    p1, rows = _pass1(out_json)
+    summary = _sampling_metrics(out_json, ks, maj_trials, seed)
+    record = {
+        "checkpoint_tag": tag,
+        "checkpoint_path": str(ckpt),
+        "output_json": str(out_json),
+        "rows": int(rows),
+        "pass1": float(p1),
+        "coverage": float(summary.get("coverage", float("nan"))),
+    }
+    for key, val in summary.get("metrics", {}).items():
+        record[key] = float(val["mean"])
+        record[f"{key}_stderr"] = float(val["stderr"])
+    return record, summary
 
 
 def _pass1(path: Path) -> tuple[float, int]:
@@ -68,6 +101,15 @@ def main() -> None:
     p.add_argument("--output_tag", default="holdout")
     p.add_argument("--output_dir", required=True)
     p.add_argument("--num_generations", type=int, default=1)
+    p.add_argument(
+        "--pass_at_ks",
+        default="1",
+        help=(
+            "Comma-separated k values for pass@k / maj@k. Testing the policy-selection claim "
+            "needs k>1, which in turn needs --num_generations >> k (16 samples for k<=8)."
+        ),
+    )
+    p.add_argument("--maj_trials", type=int, default=1000, help="Resampling trials for the maj@k estimate.")
     p.add_argument("--device", default="0")
     p.add_argument("--batch_size", type=int, default=8)
     p.add_argument("--temperature", type=float, default=0.6)
@@ -96,24 +138,27 @@ def main() -> None:
     if not ckpts:
         raise ValueError(f"No epoch checkpoints found in {run_dir}")
 
+    ks_list = sorted({int(x) for x in str(args.pass_at_ks).split(",") if x.strip()})
+    if max(ks_list) > int(args.num_generations):
+        print(
+            f"[warn] pass@k requested up to k={max(ks_list)} but "
+            f"--num_generations={int(args.num_generations)}; larger k will be skipped"
+        )
     results: list[dict[str, Any]] = []
+    summaries: dict[str, dict] = {}
     tag_to_pass: dict[str, float] = {}
 
     for ckpt in ckpts:
         tag = ckpt.name
         out_json = out_dir / f"{run_dir.name}_{tag}_{args.dataset}_{args.output_tag}_n{int(args.num_generations)}.json"
         if out_json.exists() and args.skip_existing and not args.force:
-            p1, rows = _pass1(out_json)
-            results.append(
-                {
-                    "checkpoint_tag": tag,
-                    "checkpoint_path": str(ckpt),
-                    "output_json": str(out_json),
-                    "rows": int(rows),
-                    "pass1": float(p1),
-                }
+            record, summary = _record_for(
+                tag=tag, ckpt=ckpt, out_json=out_json, ks=ks_list,
+                maj_trials=int(args.maj_trials), seed=int(args.seed),
             )
-            tag_to_pass[tag] = float(p1)
+            results.append(record)
+            summaries[tag] = summary
+            tag_to_pass[tag] = float(record["pass1"])
             continue
 
         script_dir = Path(__file__).resolve().parent
@@ -188,23 +233,22 @@ def main() -> None:
         elif device_arg not in {"", "0", "auto", "cuda"}:
             env["CUDA_VISIBLE_DEVICES"] = device_arg
         subprocess.run(cmd, check=True, cwd=str(Path.cwd()), env=env)
-        p1, rows = _pass1(out_json)
-        results.append(
-            {
-                "checkpoint_tag": tag,
-                "checkpoint_path": str(ckpt),
-                "output_json": str(out_json),
-                "rows": int(rows),
-                "pass1": float(p1),
-            }
+        record, summary = _record_for(
+            tag=tag, ckpt=ckpt, out_json=out_json, ks=ks_list,
+            maj_trials=int(args.maj_trials), seed=int(args.seed),
         )
-        tag_to_pass[tag] = float(p1)
+        results.append(record)
+        summaries[tag] = summary
+        tag_to_pass[tag] = float(record["pass1"])
 
     summary_csv = out_dir / "holdout60_summary.csv"
     with summary_csv.open("w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(
             f,
-            fieldnames=["checkpoint_tag", "checkpoint_path", "rows", "pass1", "output_json"],
+            fieldnames=sorted(
+                {k for r in results for k in r},
+                key=lambda k: (k != "checkpoint_tag", k),
+            ),
         )
         w.writeheader()
         for r in results:
@@ -218,10 +262,27 @@ def main() -> None:
             _update_metrics_csv(metrics_csv, tag_to_pass=tag_to_pass, out_csv=out_metrics)
             print(f"[saved] {out_metrics}")
 
-    print("| checkpoint | pass@1 | rows |")
-    print("|---|---:|---:|")
+    metric_cols = [
+        c
+        for c in ("pass@1", "pass@2", "pass@4", "pass@8", "pass@16", "maj@4", "maj@8", "maj@16")
+        if any(c in r for r in results)
+    ]
+    print("| checkpoint | rows | " + " | ".join(metric_cols) + " | coverage |")
+    print("|---|---:|" + "---:|" * (len(metric_cols) + 1))
     for r in sorted(results, key=lambda x: str(x["checkpoint_tag"])):
-        print(f"| {r['checkpoint_tag']} | {float(r['pass1']):.4f} | {int(r['rows'])} |")
+        cells = " | ".join(
+            (
+                f"{float(r[c]):.4f}+-{float(r.get(c + '_stderr', float('nan'))):.4f}"
+                if c in r
+                else "-"
+            )
+            for c in metric_cols
+        )
+        print(f"| {r['checkpoint_tag']} | {int(r['rows'])} | {cells} | {float(r.get('coverage', float('nan'))):.4f} |")
+
+    summary_json = out_dir / "sampling_metrics.json"
+    summary_json.write_text(json.dumps(summaries, indent=2) + "\n", encoding="utf-8")
+    print(f"[saved] {summary_json}")
 
 
 if __name__ == "__main__":
