@@ -94,6 +94,8 @@ def main() -> None:
     p.add_argument('--top_p', type=float, default=config.TOP_P)
     p.add_argument('--max_tokens', type=int, default=config.MAX_TOKENS)
     p.add_argument('--max_model_len', type=int, default=config.MAX_MODEL_LEN)
+    p.add_argument('--dtype', default='auto',
+                   help="vLLM dtype. Turing GPUs (T4) have no bfloat16, so the pilot passes float16.")
     p.add_argument('--seed', type=int, default=config.SEED)
     p.add_argument('--max_problems', type=int, default=None)
     p.add_argument('--match_timeout_s', type=float, default=0.2)
@@ -146,10 +148,10 @@ def main() -> None:
     try:
         if args.lora_adapter:
             from vllm.lora.request import LoRARequest
-            llm = build_llm(args.model_path, tensor_parallel_size=args.tensor_parallel_size, max_model_len=args.max_model_len, enable_lora=True, max_lora_rank=args.max_lora_rank)
+            llm = build_llm(args.model_path, tensor_parallel_size=args.tensor_parallel_size, max_model_len=args.max_model_len, enable_lora=True, max_lora_rank=args.max_lora_rank, dtype=args.dtype)
             lora_request = LoRARequest(args.lora_name or args.condition_name, 1, str(Path(args.lora_adapter)))
         else:
-            llm = build_llm(args.model_path, tensor_parallel_size=args.tensor_parallel_size, max_model_len=args.max_model_len)
+            llm = build_llm(args.model_path, tensor_parallel_size=args.tensor_parallel_size, max_model_len=args.max_model_len, dtype=args.dtype)
 
         thinking_opt = str(args.qwen3_enable_thinking).strip().lower()
         if thinking_opt == 'true':

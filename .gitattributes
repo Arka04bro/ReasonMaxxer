@@ -1,0 +1,5 @@
+# Shell scripts are executed on Linux (Kaggle T4, any GPU box). A CRLF checkout
+# makes bash read `set -euo pipefail\r` and abort on line 2, so pin them to LF
+# regardless of core.autocrlf on the machine doing the checkout.
+*.sh text eol=lf
+*.py text eol=lf

@@ -29,6 +29,7 @@ if [ "$STAGE" = "holdout" ]; then
     --pass_at_ks 1 \
     --device 0 --batch_size "$GEN_BATCH" \
     --temperature "$TEMPERATURE" --top_p "$TOP_P" --max_tokens "$MAX_TOKENS" \
+    --max_model_len "$MAX_MODEL_LEN" --dtype "$DTYPE" \
     --seed 42 --prompt_style auto --stop_profile auto \
     --skip_existing --update_metrics_csv
 else
@@ -41,11 +42,13 @@ else
     --problem_set full \
     --max_problems "$EVAL_MAX_PROBLEMS" \
     --output_tag "test_${CKPT_TAG}" \
+    --only_tag "$CKPT_TAG" \
     --output_dir "$ROOT/eval/${RUN}_test_n${EVAL_N_GENS}" \
     --num_generations "$EVAL_N_GENS" \
     --pass_at_ks "$PASS_AT_KS" \
     --device 0 --batch_size "$GEN_BATCH" \
     --temperature "$TEMPERATURE" --top_p "$TOP_P" --max_tokens "$MAX_TOKENS" \
+    --max_model_len "$MAX_MODEL_LEN" --dtype "$DTYPE" \
     --seed 42 --prompt_style auto --stop_profile auto \
     --skip_existing
 fi

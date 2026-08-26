@@ -99,6 +99,12 @@ def main() -> None:
     p.add_argument("--problem_set", default="full")
     p.add_argument("--max_problems", type=int, default=60)
     p.add_argument("--output_tag", default="holdout")
+    p.add_argument("--only_tag", default=None,
+                   help="Comma-separated checkpoint tags to evaluate (e.g. epochf_0p25). "
+                        "Default evaluates every checkpoint in --run_dir, which is what the "
+                        "holdout sweep wants; the test stage must restrict itself to the one "
+                        "the holdout picked, or it produces test numbers for every checkpoint "
+                        "and invites selection on the test split.")
     p.add_argument("--output_dir", required=True)
     p.add_argument("--num_generations", type=int, default=1)
     p.add_argument(
@@ -115,6 +121,10 @@ def main() -> None:
     p.add_argument("--temperature", type=float, default=0.6)
     p.add_argument("--top_p", type=float, default=0.95)
     p.add_argument("--max_tokens", type=int, default=16384)
+    p.add_argument("--max_model_len", type=int, default=None,
+                   help="Forwarded to generate_rollouts.py; defaults to the repo config value.")
+    p.add_argument("--dtype", default="auto",
+                   help="vLLM dtype, forwarded to generate_rollouts.py. Use float16 on Turing.")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--match_timeout_s", type=float, default=0.2)
     p.add_argument("--prompt_style", default="auto")
@@ -137,6 +147,17 @@ def main() -> None:
     ckpts = _list_ckpts(run_dir)
     if not ckpts:
         raise ValueError(f"No epoch checkpoints found in {run_dir}")
+    if args.only_tag:
+        wanted = {t.strip() for t in str(args.only_tag).split(",") if t.strip()}
+        kept = [c for c in ckpts if c.name in wanted]
+        missing = wanted - {c.name for c in ckpts}
+        if missing:
+            raise ValueError(
+                f"--only_tag asked for {sorted(missing)}, not present in {run_dir}. "
+                f"Available: {[c.name for c in ckpts]}"
+            )
+        print(f"[only_tag] evaluating {[c.name for c in kept]} of {len(ckpts)} checkpoints")
+        ckpts = kept
 
     ks_list = sorted({int(x) for x in str(args.pass_at_ks).split(",") if x.strip()})
     if max(ks_list) > int(args.num_generations):
@@ -177,8 +198,6 @@ def main() -> None:
             f"{run_dir.name}_{tag}",
             "--condition_name",
             f"{run_dir.name}_{tag}",
-            "--prompt_condition",
-            "base",
             "--dataset",
             str(args.dataset),
             "--problem_set",
@@ -197,6 +216,8 @@ def main() -> None:
             str(float(args.top_p)),
             "--max_tokens",
             str(int(args.max_tokens)),
+            "--dtype",
+            str(args.dtype),
             "--seed",
             str(int(args.seed)),
             "--match_timeout_s",
@@ -214,6 +235,8 @@ def main() -> None:
             "--output_name",
             str(out_json.name),
         ]
+        if args.max_model_len is not None:
+            cmd.extend(["--max_model_len", str(int(args.max_model_len))])
         if args.records_file:
             cmd.extend(["--records_file", str(args.records_file)])
         if args.holdout_ids_file:

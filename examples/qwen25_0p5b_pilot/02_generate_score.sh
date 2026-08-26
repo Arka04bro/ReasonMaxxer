@@ -21,6 +21,7 @@ $PYTHON scripts/generate_rollouts.py \
   --top_p "$TOP_P" \
   --max_tokens "$MAX_TOKENS" \
   --max_model_len "$MAX_MODEL_LEN" \
+  --dtype "$DTYPE" \
   --seed 42 \
   --output_dir "$ROOT/gen" \
   --output_name "base_n${N_GENS}.json" \

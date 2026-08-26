@@ -352,6 +352,7 @@ def build_llm(
     max_model_len: int | None = None,
     enable_lora: bool = False,
     max_lora_rank: int = 32,
+    dtype: str | None = None,
 ):
     from vllm import LLM
 
@@ -362,6 +363,12 @@ def build_llm(
         "max_model_len": int(config.MAX_MODEL_LEN if max_model_len is None else max_model_len),
         "disable_log_stats": True,
     }
+    # vLLM's dtype="auto" resolves to the checkpoint's own dtype, which is
+    # bfloat16 for Qwen2.5. Turing (T4, sm_75) has no bf16, so the pilot has to
+    # ask for float16 explicitly rather than letting it be inferred.
+    resolved_dtype = (dtype or os.environ.get("VLLM_DTYPE", "") or "auto").strip()
+    if resolved_dtype and resolved_dtype != "auto":
+        kwargs["dtype"] = resolved_dtype
     if enable_lora:
         kwargs["enable_lora"] = True
         kwargs["max_lora_rank"] = int(max_lora_rank)
